@@ -153,13 +153,73 @@ describe('nativeScriptDriver', () => {
     expect(label.text).toBe('');
   });
 
-  it('merges update props over the create snapshot', () => {
+  it('treats update props as the complete prop bag', () => {
     const { apply, view } = mount(new MockLayoutBase());
     apply(create(1, 'label', { row: 2, text: 'a' }), insert(1));
     apply(update(1, { text: 'b' }));
-    const label = view<MockTextBase & { row: number }>(1);
+    const label = view<MockTextBase & { row?: number }>(1);
     expect(label.text).toBe('b');
-    expect(label.row).toBe(2);
+    // `row` is absent from the next bag, so its write is reset rather than
+    // retained: the runtime diffs `record.props` against the whole next bag.
+    expect(label.row).toBeUndefined();
+  });
+
+  it('restores the pre-prop value when a prop is removed', () => {
+    const { apply, view } = mount(new MockLayoutBase());
+    apply(create(1, 'label', { text: 'a' }), insert(1));
+    apply(update(1, {}));
+    // `text` held '' before the create write; the removal restores it.
+    expect(view<MockTextBase>(1).text).toBe('');
+  });
+
+  it('treats undefined and null as removal on an applied prop', () => {
+    const { apply, view } = mount(new MockLayoutBase());
+    apply(create(1, 'label', { text: 'a' }), insert(1));
+    const label = view<MockTextBase>(1);
+
+    apply(update(1, { text: undefined }));
+    expect(label.text).toBe('');
+
+    apply(update(1, { text: 'b' }));
+    expect(label.text).toBe('b');
+
+    apply(update(1, { text: null }));
+    expect(label.text).toBe('');
+  });
+
+  it('skips an undefined value that never applied', () => {
+    const { apply, view } = mount(new MockLayoutBase());
+    apply(create(1, 'label', { extra: undefined }), insert(1));
+    const label = view<MockView & { extra?: unknown }>(1);
+    apply(update(1, { extra: undefined }));
+    expect('extra' in label).toBe(false);
+  });
+
+  it('resets style keys dropped from the style object', () => {
+    const { apply, view } = mount(new MockLayoutBase());
+    apply(
+      create(1, 'label', { style: { color: 'red', fontSize: 20 } }),
+      insert(1),
+    );
+    const label = view<MockTextBase>(1);
+    expect(label.style.color).toBe('red');
+
+    apply(update(1, { style: { fontSize: 20 } }));
+    expect(label.style.color).toBeUndefined();
+    expect(label.style.fontSize).toBe(20);
+
+    apply(update(1, {}));
+    expect(label.style.fontSize).toBeUndefined();
+  });
+
+  it('resets string-declared style keys when the style prop changes', () => {
+    const { apply, view } = mount(new MockLayoutBase());
+    apply(create(1, 'label', { style: 'color: red' }), insert(1));
+    const label = view<MockTextBase>(1);
+
+    apply(update(1, { style: { fontSize: 14 } }));
+    expect(label.style.color).toBeUndefined();
+    expect(label.style.fontSize).toBe(14);
   });
 
   it('maps className and style onto the view', () => {

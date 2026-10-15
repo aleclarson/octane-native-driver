@@ -53,6 +53,10 @@ interface HostNode {
   readonly muted: Set<string>;
   /** Whether this node's `text` has been driven by `#text` children. */
   textApplied: boolean;
+  /** Pre-prop values captured on first write, so a removed plain-field prop restores what it displaced. */
+  propDefaults?: Record<string, unknown>;
+  /** Style keys the last `style` write installed, diffed for per-key removal. */
+  styleKeys?: Set<string>;
 }
 
 /**
@@ -200,16 +204,23 @@ function applyProps(
 }
 
 /**
- * `update` carries the host's dynamic-prop snapshot; attributes that were
- * static in the compiled plan arrive only with `create`. Merge instead of
- * replace, or a first update would strip a node's static layout props.
+ * `update` carries the host's complete prop bag: a key present in the last
+ * applied bag but absent from the next is a removal, and the view state it
+ * installed returns to the prop's default. `undefined` never crosses the
+ * wire (the runtime elides it); `null` is "not supplied" for props without
+ * an explicit nullable contract — both reset through `setProp`.
  */
 function updateProps(
   node: HostNode,
   next: Readonly<Record<string, unknown>>,
 ): void {
+  const dropped: string[] = [];
+  for (const name in node.props) {
+    if (node.props[name] != null && !(name in next)) dropped.push(name);
+  }
   applyProps(node, next);
-  node.props = { ...node.props, ...next };
+  for (const name of dropped) resetProp(node, node.view, name);
+  node.props = next;
 }
 
 function setProp(
@@ -229,7 +240,7 @@ function setProp(
     return;
   }
   if (name === 'style') {
-    applyStyle(view, value);
+    applyStyle(node, view, value);
     return;
   }
   if (name === 'renderItem' && view instanceof ListView) {
@@ -240,6 +251,21 @@ function setProp(
     );
     return;
   }
+  // `null`/`unsetValue` restore the prop's default rather than writing a
+  // literal null through a native setter. `undefined` is a removal: skip it
+  // when nothing applied (NativeScript setters coerce it badly) and reset
+  // when a real value did.
+  if (value == null || value === unsetValue) {
+    if (value === undefined && node.props[name] == null) return;
+    resetProp(node, view, name);
+    return;
+  }
+  // Capture the pre-prop value once so a plain (non-`Property`) field can be
+  // restored when the prop is removed later.
+  const defaults = (node.propDefaults ??= {});
+  if (!(name in defaults)) {
+    defaults[name] = (view as unknown as Record<string, unknown>)[name];
+  }
   // Core raises `<name>Change` for a script write exactly as for a user
   // edit; a controlled input must not see its own value come back as one.
   const echo = `${name}Change`;
@@ -247,6 +273,41 @@ function setProp(
   if (listening) node.muted.add(echo);
   try {
     (view as unknown as Record<string, unknown>)[name] = value;
+  } finally {
+    if (listening) node.muted.delete(echo);
+  }
+}
+
+/** Restore a removed prop to the value it holds when never supplied. */
+function resetProp(node: HostNode, view: ViewBase | null, name: string): void {
+  if (view === null) return;
+  if (name === 'children' || name === 'key' || name === 'ref') return;
+  // `on*` handlers unbind through `event` commands, not props.
+  if (EVENT_PROP.test(name)) return;
+  if (name === 'className' || name === 'class') {
+    view.className = unsetValue;
+    return;
+  }
+  if (name === 'style') {
+    applyStyle(node, view, null);
+    return;
+  }
+  if (name === 'renderItem' && view instanceof ListView) {
+    setRenderItem(view, null, createNativeScriptRoot);
+    return;
+  }
+  // Core raises `<name>Change` for a script write exactly as for a user
+  // edit; a controlled input must not see its own value come back as one.
+  const echo = `${name}Change`;
+  const listening = node.listeners.has(echo);
+  if (listening) node.muted.add(echo);
+  const field = view as unknown as Record<string, unknown>;
+  try {
+    // Property/CssProperty setters consume the sentinel and restore the
+    // declared default. A plain field stores it raw — detect that and write
+    // back the captured pre-prop value instead.
+    field[name] = unsetValue;
+    if (field[name] === unsetValue) field[name] = node.propDefaults?.[name];
   } finally {
     if (listening) node.muted.delete(echo);
   }
@@ -265,13 +326,68 @@ function normalizeClass(value: unknown): string {
   return '';
 }
 
-function applyStyle(view: ViewBase, value: unknown): void {
-  if (value == null || value === unsetValue) return;
+/**
+ * The `style` prop replaces wholesale — a key dropped or nulled since the
+ * last apply resets what it installed (`unsetValue` clears a local
+ * `CssProperty` value so the cascade can re-apply). String styles are parsed
+ * for their declared names so a later object or removal can reset them.
+ */
+function applyStyle(node: HostNode, view: ViewBase, value: unknown): void {
+  const applied = node.styleKeys;
+  node.styleKeys = undefined;
   if (typeof value === 'string') {
+    clearStyleKeys(view, applied);
     view.setInlineStyle(value);
+    node.styleKeys = inlineStyleKeys(value);
     return;
   }
-  if (typeof value === 'object') Object.assign(view.style, value);
+  if (value == null || value === unsetValue || typeof value !== 'object') {
+    clearStyleKeys(view, applied);
+    return;
+  }
+  if (applied !== undefined) {
+    for (const key of applied) {
+      if (!(key in value)) unsetStyleKey(view, key);
+    }
+  }
+  const style = view.style as unknown as Record<string, unknown>;
+  for (const [key, nextValue] of Object.entries(value)) {
+    if (nextValue == null) unsetStyleKey(view, key);
+    else style[key] = nextValue;
+  }
+  node.styleKeys = new Set(Object.keys(value));
+}
+
+function clearStyleKeys(view: ViewBase, keys: Set<string> | undefined): void {
+  if (keys === undefined) return;
+  for (const key of keys) unsetStyleKey(view, key);
+}
+
+function unsetStyleKey(view: ViewBase, name: string): void {
+  const style = view.style as unknown as Record<string, unknown> & {
+    setUnscopedCssVariable?: (name: string, value: unknown) => void;
+  };
+  if (name.startsWith('--')) {
+    style.setUnscopedCssVariable?.(name, unsetValue);
+    return;
+  }
+  style[name] = unsetValue;
+  // A style field outside the CssProperty registry stores the sentinel raw.
+  if (style[name] === unsetValue) style[name] = undefined;
+}
+
+function inlineStyleKeys(style: string): Set<string> {
+  const keys = new Set<string>();
+  for (const declaration of style.split(';')) {
+    const colon = declaration.indexOf(':');
+    if (colon === -1) continue;
+    const name = declaration.slice(0, colon).trim();
+    if (name !== '')
+      keys.add(
+        name.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase()),
+      );
+  }
+  return keys;
 }
 
 /** Recompute a text host's `text` from its `#text` children. */

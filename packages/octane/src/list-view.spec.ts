@@ -88,7 +88,7 @@ describe('listview renderItem', () => {
     expect(cellText(list, 0)).toBe('0:z');
     expect(cellText(list, 1)).toBe('1:b');
 
-    apply(update(1, { items: rows('x', 'y') }));
+    apply(update(1, { items: rows('x', 'y'), renderItem: renderRow }));
     expect(cellText(list, 0)).toBe('0:x');
     expect(cellText(list, 1)).toBe('1:y');
   });
@@ -109,11 +109,9 @@ describe('listview renderItem', () => {
   });
 
   it('re-renders live cells in place when renderItem changes identity', () => {
+    const items = rows('a', 'b');
     const { apply, view } = mount(new MockLayoutBase());
-    apply(
-      create(1, 'listview', { items: rows('a', 'b'), renderItem: renderRow }),
-      insert(1),
-    );
+    apply(create(1, 'listview', { items, renderItem: renderRow }), insert(1));
     const list = view<MockListView>(1);
     list.show(0, 1);
     const host = list.cells[0].view;
@@ -121,6 +119,7 @@ describe('listview renderItem', () => {
 
     apply(
       update(1, {
+        items,
         renderItem: (row: Row, index: number) =>
           universalValue(labelPlan, [`${index}=${row.name}`]),
       }),
@@ -181,7 +180,7 @@ describe('listview renderItem', () => {
     view<MockListView>(1).show(0);
 
     apply(
-      update(1, { items: rows('b') }),
+      update(1, { items: rows('b'), renderItem: renderRow }),
       create(2, 'label'),
       event(2, 'loaded', listener(3)),
       insert(2),
