@@ -1,3 +1,8 @@
+import { cssTreeParse } from '@nativescript/core/css/css-tree-parser';
+import {
+  _getProperties,
+  _getStyleProperties,
+} from '@nativescript/core/ui/core/properties';
 import {
   ActionBar,
   ContentView,
@@ -53,6 +58,9 @@ interface HostNode {
   readonly muted: Set<string>;
   /** Whether this node's `text` has been driven by `#text` children. */
   textApplied: boolean;
+  readonly propDefaults: Map<string, unknown>;
+  readonly styleDefaults: Map<string, unknown>;
+  styleKeys: Set<string>;
 }
 
 /**
@@ -165,6 +173,9 @@ function createNode(
     listeners: new Map(),
     muted: new Set(),
     textApplied: false,
+    propDefaults: new Map(),
+    styleDefaults: new Map(),
+    styleKeys: new Set(),
   };
   if (node.view !== null) viewOwners.set(node.view, { container, node });
   applyProps(node, props);
@@ -199,17 +210,17 @@ function applyProps(
   }
 }
 
-/**
- * `update` carries the host's dynamic-prop snapshot; attributes that were
- * static in the compiled plan arrive only with `create`. Merge instead of
- * replace, or a first update would strip a node's static layout props.
- */
+/** `update` is the complete next bag, including the plan's static props. */
 function updateProps(
   node: HostNode,
   next: Readonly<Record<string, unknown>>,
 ): void {
+  for (const name of Object.keys(node.props)) {
+    if (!Object.hasOwn(next, name) && node.view !== null)
+      setProp(node, node.view, name, undefined);
+  }
   applyProps(node, next);
-  node.props = { ...node.props, ...next };
+  node.props = next;
 }
 
 function setProp(
@@ -221,6 +232,22 @@ function setProp(
   if (name === 'children' || name === 'key' || name === 'ref') return;
   // Event props arrive as their own `event` commands.
   if (EVENT_PROP.test(name)) return;
+  if (
+    value === undefined &&
+    !node.propDefaults.has(name) &&
+    (name !== 'style' || node.styleKeys.size === 0)
+  )
+    return;
+  if (
+    value != null &&
+    value !== unsetValue &&
+    name !== 'style' &&
+    !node.propDefaults.has(name)
+  )
+    node.propDefaults.set(
+      name,
+      (view as unknown as Record<string, unknown>)[name],
+    );
   if (name === 'className' || name === 'class') {
     view.className =
       value == null || value === unsetValue
@@ -229,7 +256,7 @@ function setProp(
     return;
   }
   if (name === 'style') {
-    applyStyle(view, value);
+    applyStyle(node, view, value);
     return;
   }
   if (name === 'renderItem' && view instanceof ListView) {
@@ -240,17 +267,27 @@ function setProp(
     );
     return;
   }
-  // `undefined` means "prop not supplied" — skip the write. NativeScript
-  // native setters coerce it (e.g. editable → ios.userInteractionEnabled =
-  // NO) leaving dead UI that still has its JS listeners.
-  if (value === undefined) return;
+  // Never forward nullish values to coercing native setters. A never-applied
+  // prop has nothing to restore, including when its initial value is undefined.
+  const target = view as unknown as Record<string, unknown>;
+  if (value == null || value === unsetValue) {
+    if (!node.propDefaults.has(name)) return;
+    value = isRegisteredProperty(view, name)
+      ? unsetValue
+      : node.propDefaults.get(name);
+  }
   // Core raises `<name>Change` for a script write exactly as for a user
   // edit; a controlled input must not see its own value come back as one.
   const echo = `${name}Change`;
   const listening = node.listeners.has(echo);
   if (listening) node.muted.add(echo);
   try {
-    (view as unknown as Record<string, unknown>)[name] = value;
+    target[name] = value;
+    if (
+      value === unsetValue &&
+      _getStyleProperties().some((p) => p.name === name)
+    )
+      refreshCss(view);
   } finally {
     if (listening) node.muted.delete(echo);
   }
@@ -269,13 +306,95 @@ function normalizeClass(value: unknown): string {
   return '';
 }
 
-function applyStyle(view: ViewBase, value: unknown): void {
-  if (value == null || value === unsetValue) return;
+/** Match the actual registered setter, not merely a globally registered name. */
+function isRegisteredProperty(view: ViewBase, name: string): boolean {
+  let prototype: object | null = view;
+  while (prototype !== null) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+    if (descriptor !== undefined) {
+      return (
+        _getProperties().some(
+          (property) =>
+            property.name === name && property.set === descriptor.set,
+        ) ||
+        (_getStyleProperties().some((property) => property.name === name) &&
+          descriptor.set !== undefined &&
+          name in view.style)
+      );
+    }
+    prototype = Object.getPrototypeOf(prototype);
+  }
+  return false;
+}
+
+/** Core discards the cascaded value when a local value occupies its slot. */
+function refreshCss(view: ViewBase): void {
+  // No public single-key refresh exists in core 9.1. setInlineStyle only writes
+  // declarations; the recursive _onCssStateChange would also touch descendants.
+  view._cssState?.onChange();
+}
+
+/** Replace authored keys; clearing a local CssProperty must restore class CSS. */
+function applyStyle(node: HostNode, view: ViewBase, value: unknown): void {
+  const style = view.style as unknown as Record<string, unknown>;
+  const next =
+    typeof value === 'string'
+      ? inlineStyleKeys(value)
+      : value !== null && typeof value === 'object' && value !== unsetValue
+        ? new Set(Object.keys(value))
+        : new Set<string>();
+  for (const key of node.styleKeys) {
+    if (!next.has(key)) unsetStyleKey(node, view, key);
+  }
+  for (const key of next) {
+    if (!node.styleDefaults.has(key)) node.styleDefaults.set(key, style[key]);
+  }
   if (typeof value === 'string') {
     view.setInlineStyle(value);
-    return;
+  } else if (
+    value !== null &&
+    typeof value === 'object' &&
+    value !== unsetValue
+  ) {
+    for (const key of next) {
+      const entry = (value as Record<string, unknown>)[key];
+      if (entry == null || entry === unsetValue) unsetStyleKey(node, view, key);
+      else style[key] = entry;
+    }
   }
-  if (typeof value === 'object') Object.assign(view.style, value);
+  node.styleKeys = next;
+}
+
+function unsetStyleKey(node: HostNode, view: ViewBase, name: string): void {
+  const style = view.style as unknown as Record<string, unknown>;
+  if (name.startsWith('--')) {
+    view.style.removeUnscopedCssVariable(name);
+  } else {
+    const registered = _getStyleProperties().some(
+      (p) => p.name === name || p.cssLocalName === name,
+    );
+    style[name] = registered ? unsetValue : node.styleDefaults.get(name);
+  }
+  refreshCss(view);
+}
+
+function inlineStyleKeys(style: string): Set<string> {
+  const keys = new Set<string>();
+  const sheet = cssTreeParse(`local { ${style} }`, undefined);
+  for (const rule of sheet.stylesheet.rules) {
+    for (const declaration of rule.declarations ?? []) {
+      if (declaration.type !== 'declaration') continue;
+      const name: string = declaration.property;
+      keys.add(
+        name.startsWith('--')
+          ? name
+          : name.replace(/-([a-z])/g, (_, letter: string) =>
+              letter.toUpperCase(),
+            ),
+      );
+    }
+  }
+  return keys;
 }
 
 /** Recompute a text host's `text` from its `#text` children. */
@@ -602,6 +721,9 @@ function recreateView(container: NativeScriptContainer, node: HostNode): void {
   viewOwners.set(view, { container, node });
   node.view = view;
   node.textApplied = false;
+  node.propDefaults.clear();
+  node.styleDefaults.clear();
+  node.styleKeys.clear();
   applyProps(node, node.props);
   for (const [type, handler] of node.listeners) view.on(type, handler);
   let index = 0;

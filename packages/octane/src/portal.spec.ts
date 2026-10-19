@@ -16,6 +16,10 @@ import {
   type UniversalRoot,
 } from 'octane/universal/native';
 
+vi.mock(
+  '@nativescript/core/ui/core/properties',
+  async () => import('@nativescript/core'),
+);
 vi.mock('@nativescript/core', async () =>
   (await import('../tests/core-mock.js')).createCoreMock(),
 );

@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
+vi.mock(
+  '@nativescript/core/ui/core/properties',
+  async () => import('@nativescript/core'),
+);
 vi.mock('@nativescript/core', async () =>
   (await import('../tests/core-mock.js')).createCoreMock(),
 );

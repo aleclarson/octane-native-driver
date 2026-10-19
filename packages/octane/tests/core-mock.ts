@@ -285,6 +285,8 @@ export function createCoreMock(): Record<string, unknown> {
     TabView: MockTabView,
     TabViewItem: MockTabViewItem,
     unsetValue: Symbol('unsetValue'),
+    _getProperties: () => [],
+    _getStyleProperties: () => [],
   };
   const derive = (names: readonly string[], Base: new () => object): void => {
     for (const name of names)

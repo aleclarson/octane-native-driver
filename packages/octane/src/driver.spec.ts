@@ -5,6 +5,10 @@ import type {
   UniversalRoot,
 } from 'octane/universal/native';
 
+vi.mock(
+  '@nativescript/core/ui/core/properties',
+  async () => import('@nativescript/core'),
+);
 vi.mock('@nativescript/core', async () =>
   (await import('../tests/core-mock.js')).createCoreMock(),
 );
@@ -153,10 +157,10 @@ describe('nativeScriptDriver', () => {
     expect(label.text).toBe('');
   });
 
-  it('merges update props over the create snapshot', () => {
+  it('preserves static props included in the complete update snapshot', () => {
     const { apply, view } = mount(new MockLayoutBase());
     apply(create(1, 'label', { row: 2, text: 'a' }), insert(1));
-    apply(update(1, { text: 'b' }));
+    apply(update(1, { row: 2, text: 'b' }));
     const label = view<MockTextBase & { row: number }>(1);
     expect(label.text).toBe('b');
     expect(label.row).toBe(2);

@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { universalPlan, universalValue } from 'octane/universal/native';
 
+vi.mock(
+  '@nativescript/core/ui/core/properties',
+  async () => import('@nativescript/core'),
+);
 vi.mock('@nativescript/core', async () =>
   (await import('../tests/core-mock.js')).createCoreMock(),
 );
@@ -88,7 +92,7 @@ describe('listview renderItem', () => {
     expect(cellText(list, 0)).toBe('0:z');
     expect(cellText(list, 1)).toBe('1:b');
 
-    apply(update(1, { items: rows('x', 'y') }));
+    apply(update(1, { items: rows('x', 'y'), renderItem: renderRow }));
     expect(cellText(list, 0)).toBe('0:x');
     expect(cellText(list, 1)).toBe('1:y');
   });
@@ -121,6 +125,7 @@ describe('listview renderItem', () => {
 
     apply(
       update(1, {
+        items: list.items,
         renderItem: (row: Row, index: number) =>
           universalValue(labelPlan, [`${index}=${row.name}`]),
       }),
